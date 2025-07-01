@@ -1,43 +1,66 @@
 import pyspark.sql.functions as f
 from pyspark.sql import SparkSession
-from pyspark.sql.column import Column, _to_java_column, _to_seq
 from pyspark.sql.window import Window
 import time
 import platform
 import os
-
-
-def addCategoryName(spark, col):
-    """
-    Fonction wrapper pour utiliser l'UDF Scala depuis Python
-    """
-    # Récupération du SparkContext
-    sc = spark.sparkContext
-    # Accès à la fonction UDF Scala via la JVM
-    add_category_name_udf = sc._jvm.fr.hymaia.sparkfordev.udf.Exo4.addCategoryNameCol()
-    # Retourne un objet Column avec l'application de l'UDF Scala
-    return Column(add_category_name_udf.apply(_to_seq(sc, [col], _to_java_column)))
+import subprocess
 
 
 def get_adaptive_spark_config():
-    """Auto-détection des ressources pour configuration optimale (sans psutil)"""
-    # Détection approximative de la RAM (fallback si pas d'info)
+    """Auto-détection des ressources pour configuration optimale (Linux/Windows/Mac)"""
+    total_ram_gb = 8  # Fallback par défaut
+    
     try:
-        # Linux: lecture de /proc/meminfo
-        if platform.system() == "Linux":
+        system = platform.system()
+        
+        if system == "Linux":
+            # Linux: lecture de /proc/meminfo
             with open('/proc/meminfo', 'r') as f:
                 for line in f:
                     if 'MemTotal:' in line:
                         total_ram_kb = int(line.split()[1])
                         total_ram_gb = total_ram_kb // (1024 * 1024)
                         break
-                else:
-                    total_ram_gb = 8  # Fallback
+                        
+        elif system == "Windows":
+            # Windows: utilisation de wmic
+            try:
+                result = subprocess.run(['wmic', 'computersystem', 'get', 'TotalPhysicalMemory', '/value'], 
+                                       capture_output=True, text=True, timeout=10)
+                for line in result.stdout.split('\n'):
+                    if 'TotalPhysicalMemory=' in line:
+                        total_ram_bytes = int(line.split('=')[1].strip())
+                        total_ram_gb = total_ram_bytes // (1024**3)
+                        break
+            except:
+                # Fallback Windows avec systeminfo
+                try:
+                    result = subprocess.run(['systeminfo'], capture_output=True, text=True, timeout=15)
+                    for line in result.stdout.split('\n'):
+                        if 'Total Physical Memory:' in line:
+                            # Parsing "Total Physical Memory: 16,384 MB" ou "Total Physical Memory: 16 384 Mo"
+                            memory_str = line.split(':')[1].strip()
+                            # Extraction des chiffres
+                            memory_mb = int(''.join(filter(str.isdigit, memory_str.split()[0].replace(',', '').replace(' ', ''))))
+                            total_ram_gb = memory_mb // 1024
+                            break
+                except:
+                    total_ram_gb = 8  # Fallback Windows
+                    
+        elif system == "Darwin":  # macOS
+            # Mac: utilisation de sysctl
+            try:
+                result = subprocess.run(['sysctl', 'hw.memsize'], capture_output=True, text=True, timeout=10)
+                memory_bytes = int(result.stdout.split(':')[1].strip())
+                total_ram_gb = memory_bytes // (1024**3)
+            except:
+                total_ram_gb = 8  # Fallback Mac
         else:
-            # Windows/Mac: estimation conservatrice  
-            total_ram_gb = 8
-    except:
-        total_ram_gb = 8  # Fallback sécurisé
+            total_ram_gb = 8  # Autre OS
+            
+    except Exception:
+        total_ram_gb = 8  # Fallback général
     
     # Détection CPU
     try:
@@ -61,15 +84,13 @@ def get_adaptive_spark_config():
     
     return driver_memory, max_result, total_ram_gb, cpu_count
 
-
 def create_adaptive_spark_session():
     """Configuration Spark adaptative selon les ressources machine"""
     driver_memory, max_result, total_ram_gb, cpu_count = get_adaptive_spark_config()
     
     return SparkSession.builder \
-        .appName("exo4_scala_udf_adaptive") \
+        .appName("exo4_no_udf_adaptive") \
         .master("local[*]") \
-        .config("spark.jars", "src/resources/exo4/udf.jar") \
         .config("spark.driver.memory", driver_memory) \
         .config("spark.driver.maxResultSize", max_result) \
         .config("spark.sql.adaptive.enabled", "true") \
@@ -78,7 +99,7 @@ def create_adaptive_spark_session():
 
 
 def main():
-    print("🚀 Exercice 4 - UDF SCALA (Version Adaptative)")
+    print("🚀 Exercice 4 - SANS UDF (Version Adaptative)")
     
     # Affichage des specs machine
     driver_memory, max_result, total_ram_gb, cpu_count = get_adaptive_spark_config()
@@ -99,19 +120,18 @@ def main():
         timings['lecture'] = time.time() - step_start
         print(f"   ✅ {row_count:,} lignes lues en {timings['lecture']:.1f}s")
         
-        # 🔧 ÉTAPE 2: Transformation avec UDF Scala
+        # 🔧 ÉTAPE 2: Transformation avec fonctions natives
         step_start = time.time()
-        print("🔧 Ajout category_name (UDF Scala)...")
-        
+        print("🔧 Ajout category_name (fonctions natives)...")
         df_with_category = df.withColumn(
             "category_name",
-            addCategoryName(spark, f.col("category"))
+            f.when(f.col("category") < 6, "food").otherwise("furniture")
         ).cache()
         
         # Force le cache
         cached_count = df_with_category.count()
         timings['transformation'] = time.time() - step_start
-        print(f"   ✅ Transformation UDF + cache en {timings['transformation']:.1f}s")
+        print(f"   ✅ Transformation + cache en {timings['transformation']:.1f}s")
         
         # 🪟 ÉTAPE 3: Window Functions
         step_start = time.time()
@@ -142,13 +162,13 @@ def main():
         
         # 📊 RÉSULTATS FINAUX
         print("\n" + "="*60)
-        print("📊 RÉSULTATS - UDF SCALA")
+        print("📊 RÉSULTATS - SANS UDF")
         print("="*60)
         print(f"⏱️  Temps total: {timings['total']:.2f}s")
         print(f"📈 Débit: {final_count/timings['total']:,.0f} lignes/sec")
         print(f"📋 Détail par étape:")
         print(f"   📖 Lecture: {timings['lecture']:.1f}s ({timings['lecture']/timings['total']*100:.1f}%)")
-        print(f"   🔧 Transformation UDF: {timings['transformation']:.1f}s ({timings['transformation']/timings['total']*100:.1f}%)")
+        print(f"   🔧 Transformation: {timings['transformation']:.1f}s ({timings['transformation']/timings['total']*100:.1f}%)")
         print(f"   🪟 Window functions: {timings['window_functions']:.1f}s ({timings['window_functions']/timings['total']*100:.1f}%)")
         print("="*60)
         

@@ -1,22 +1,24 @@
 import pyspark.sql.functions as f
 from pyspark.sql import SparkSession
-from pyspark.sql.column import Column, _to_java_column, _to_seq
+from pyspark.sql.types import StringType
+from pyspark.sql.functions import udf
 from pyspark.sql.window import Window
 import time
 import platform
 import os
 
 
-def addCategoryName(spark, col):
+def category_classifier(category):
     """
-    Fonction wrapper pour utiliser l'UDF Scala depuis Python
+    UDF Python pour classifier les catégories
     """
-    # Récupération du SparkContext
-    sc = spark.sparkContext
-    # Accès à la fonction UDF Scala via la JVM
-    add_category_name_udf = sc._jvm.fr.hymaia.sparkfordev.udf.Exo4.addCategoryNameCol()
-    # Retourne un objet Column avec l'application de l'UDF Scala
-    return Column(add_category_name_udf.apply(_to_seq(sc, [col], _to_java_column)))
+    if category is None:
+        return None
+    
+    if int(category) < 6:
+        return "food"
+    else:
+        return "furniture"
 
 
 def get_adaptive_spark_config():
@@ -67,9 +69,8 @@ def create_adaptive_spark_session():
     driver_memory, max_result, total_ram_gb, cpu_count = get_adaptive_spark_config()
     
     return SparkSession.builder \
-        .appName("exo4_scala_udf_adaptive") \
+        .appName("exo4_python_udf_adaptive") \
         .master("local[*]") \
-        .config("spark.jars", "src/resources/exo4/udf.jar") \
         .config("spark.driver.memory", driver_memory) \
         .config("spark.driver.maxResultSize", max_result) \
         .config("spark.sql.adaptive.enabled", "true") \
@@ -78,7 +79,7 @@ def create_adaptive_spark_session():
 
 
 def main():
-    print("🚀 Exercice 4 - UDF SCALA (Version Adaptative)")
+    print("🚀 Exercice 4 - UDF PYTHON (Version Adaptative)")
     
     # Affichage des specs machine
     driver_memory, max_result, total_ram_gb, cpu_count = get_adaptive_spark_config()
@@ -99,13 +100,16 @@ def main():
         timings['lecture'] = time.time() - step_start
         print(f"   ✅ {row_count:,} lignes lues en {timings['lecture']:.1f}s")
         
-        # 🔧 ÉTAPE 2: Transformation avec UDF Scala
+        # 🔧 ÉTAPE 2: Transformation avec UDF Python
         step_start = time.time()
-        print("🔧 Ajout category_name (UDF Scala)...")
+        print("🔧 Ajout category_name (UDF Python)...")
+        
+        # Création UDF
+        category_udf = udf(category_classifier, StringType())
         
         df_with_category = df.withColumn(
             "category_name",
-            addCategoryName(spark, f.col("category"))
+            category_udf(f.col("category"))
         ).cache()
         
         # Force le cache
@@ -142,7 +146,7 @@ def main():
         
         # 📊 RÉSULTATS FINAUX
         print("\n" + "="*60)
-        print("📊 RÉSULTATS - UDF SCALA")
+        print("📊 RÉSULTATS - UDF PYTHON")
         print("="*60)
         print(f"⏱️  Temps total: {timings['total']:.2f}s")
         print(f"📈 Débit: {final_count/timings['total']:,.0f} lignes/sec")
