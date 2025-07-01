@@ -6,6 +6,7 @@ from pyspark.sql.window import Window
 import time
 import platform
 import os
+import subprocess
 
 
 def category_classifier(category):
@@ -22,24 +23,59 @@ def category_classifier(category):
 
 
 def get_adaptive_spark_config():
-    """Auto-détection des ressources pour configuration optimale (sans psutil)"""
-    # Détection approximative de la RAM (fallback si pas d'info)
+    """Auto-détection des ressources pour configuration optimale (Linux/Windows/Mac)"""
+    total_ram_gb = 8  # Fallback par défaut
+    
     try:
-        # Linux: lecture de /proc/meminfo
-        if platform.system() == "Linux":
+        system = platform.system()
+        
+        if system == "Linux":
+            # Linux: lecture de /proc/meminfo
             with open('/proc/meminfo', 'r') as f:
                 for line in f:
                     if 'MemTotal:' in line:
                         total_ram_kb = int(line.split()[1])
                         total_ram_gb = total_ram_kb // (1024 * 1024)
                         break
-                else:
-                    total_ram_gb = 8  # Fallback
+                        
+        elif system == "Windows":
+            # Windows: utilisation de wmic
+            try:
+                result = subprocess.run(['wmic', 'computersystem', 'get', 'TotalPhysicalMemory', '/value'], 
+                                       capture_output=True, text=True, timeout=10)
+                for line in result.stdout.split('\n'):
+                    if 'TotalPhysicalMemory=' in line:
+                        total_ram_bytes = int(line.split('=')[1].strip())
+                        total_ram_gb = total_ram_bytes // (1024**3)
+                        break
+            except:
+                # Fallback Windows avec systeminfo
+                try:
+                    result = subprocess.run(['systeminfo'], capture_output=True, text=True, timeout=15)
+                    for line in result.stdout.split('\n'):
+                        if 'Total Physical Memory:' in line:
+                            # Parsing "Total Physical Memory: 16,384 MB" ou "Total Physical Memory: 16 384 Mo"
+                            memory_str = line.split(':')[1].strip()
+                            # Extraction des chiffres
+                            memory_mb = int(''.join(filter(str.isdigit, memory_str.split()[0].replace(',', '').replace(' ', ''))))
+                            total_ram_gb = memory_mb // 1024
+                            break
+                except:
+                    total_ram_gb = 8  # Fallback Windows
+                    
+        elif system == "Darwin":  # macOS
+            # Mac: utilisation de sysctl
+            try:
+                result = subprocess.run(['sysctl', 'hw.memsize'], capture_output=True, text=True, timeout=10)
+                memory_bytes = int(result.stdout.split(':')[1].strip())
+                total_ram_gb = memory_bytes // (1024**3)
+            except:
+                total_ram_gb = 8  # Fallback Mac
         else:
-            # Windows/Mac: estimation conservatrice  
-            total_ram_gb = 8
-    except:
-        total_ram_gb = 8  # Fallback sécurisé
+            total_ram_gb = 8  # Autre OS
+            
+    except Exception:
+        total_ram_gb = 8  # Fallback général
     
     # Détection CPU
     try:
@@ -48,7 +84,7 @@ def get_adaptive_spark_config():
         cpu_count = 4
     
     # Configuration adaptative selon la machine
-    if total_ram_gb >= 24:
+    if total_ram_gb >= 20:
         driver_memory = "12g"
         max_result = "8g"
     elif total_ram_gb >= 16:
@@ -96,9 +132,9 @@ def main():
         step_start = time.time()
         print("📖 Lecture des données...")
         df = spark.read.option("header", "true").option("inferSchema", "true").csv("src/resources/exo4/sell.csv")
-        row_count = df.count()
+        df.select(f.sum("price")).collect()
         timings['lecture'] = time.time() - step_start
-        print(f"   ✅ {row_count:,} lignes lues en {timings['lecture']:.1f}s")
+        print(f"   ✅ Lecture en {timings['lecture']:.1f}s")
         
         # 🔧 ÉTAPE 2: Transformation avec UDF Python
         step_start = time.time()
@@ -113,9 +149,9 @@ def main():
         ).cache()
         
         # Force le cache
-        cached_count = df_with_category.count()
+        df_with_category.select(f.sum("price")).collect()
         timings['transformation'] = time.time() - step_start
-        print(f"   ✅ Transformation UDF + cache en {timings['transformation']:.1f}s")
+        print(f"   ✅ Transformation en {timings['transformation']:.1f}s")
         
         # 🪟 ÉTAPE 3: Window Functions
         step_start = time.time()
@@ -135,7 +171,10 @@ def main():
             f.sum("price").over(window_30)
         )
         
-        final_count = df_with_windows.count()
+        df_with_windows.agg(
+    f.sum("total_price_per_category_per_day"),
+    f.sum("total_price_per_category_per_day_last_30_days")
+).collect()
         timings['window_functions'] = time.time() - step_start
         print(f"   ✅ Window functions en {timings['window_functions']:.1f}s")
         
@@ -149,7 +188,6 @@ def main():
         print("📊 RÉSULTATS - UDF PYTHON")
         print("="*60)
         print(f"⏱️  Temps total: {timings['total']:.2f}s")
-        print(f"📈 Débit: {final_count/timings['total']:,.0f} lignes/sec")
         print(f"📋 Détail par étape:")
         print(f"   📖 Lecture: {timings['lecture']:.1f}s ({timings['lecture']/timings['total']*100:.1f}%)")
         print(f"   🔧 Transformation UDF: {timings['transformation']:.1f}s ({timings['transformation']/timings['total']*100:.1f}%)")

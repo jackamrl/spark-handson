@@ -84,6 +84,7 @@ def get_adaptive_spark_config():
     
     return driver_memory, max_result, total_ram_gb, cpu_count
 
+
 def create_adaptive_spark_session():
     """Configuration Spark adaptative selon les ressources machine"""
     driver_memory, max_result, total_ram_gb, cpu_count = get_adaptive_spark_config()
@@ -114,29 +115,23 @@ def main():
         
         # 📖 ÉTAPE 1: Lecture des données
         step_start = time.time()
-        print("📖 Lecture des données...")
         df = spark.read.option("header", "true").option("inferSchema", "true").csv("src/resources/exo4/sell.csv")
-        row_count = df.count()
+        df.select(f.sum("price")).collect()
         timings['lecture'] = time.time() - step_start
-        print(f"   ✅ {row_count:,} lignes lues en {timings['lecture']:.1f}s")
         
         # 🔧 ÉTAPE 2: Transformation avec fonctions natives
         step_start = time.time()
-        print("🔧 Ajout category_name (fonctions natives)...")
         df_with_category = df.withColumn(
             "category_name",
             f.when(f.col("category") < 6, "food").otherwise("furniture")
         ).cache()
         
         # Force le cache
-        cached_count = df_with_category.count()
+        df_with_category.select(f.sum("price")).collect()
         timings['transformation'] = time.time() - step_start
-        print(f"   ✅ Transformation + cache en {timings['transformation']:.1f}s")
-        
+                
         # 🪟 ÉTAPE 3: Window Functions
-        step_start = time.time()
-        print("🪟 Window functions...")
-        
+        step_start = time.time()        
         # Window par catégorie/jour
         window_day = Window.partitionBy("category_name", "date")
         df_with_windows = df_with_category.withColumn(
@@ -151,10 +146,11 @@ def main():
             f.sum("price").over(window_30)
         )
         
-        final_count = df_with_windows.count()
-        timings['window_functions'] = time.time() - step_start
-        print(f"   ✅ Window functions en {timings['window_functions']:.1f}s")
-        
+        df_with_windows.agg(
+    f.sum("total_price_per_category_per_day"),
+    f.sum("total_price_per_category_per_day_last_30_days")
+).collect()
+        timings['window_functions'] = time.time() - step_start        
         # 🧹 Nettoyage
         df_with_category.unpersist()
         
@@ -165,7 +161,6 @@ def main():
         print("📊 RÉSULTATS - SANS UDF")
         print("="*60)
         print(f"⏱️  Temps total: {timings['total']:.2f}s")
-        print(f"📈 Débit: {final_count/timings['total']:,.0f} lignes/sec")
         print(f"📋 Détail par étape:")
         print(f"   📖 Lecture: {timings['lecture']:.1f}s ({timings['lecture']/timings['total']*100:.1f}%)")
         print(f"   🔧 Transformation: {timings['transformation']:.1f}s ({timings['transformation']/timings['total']*100:.1f}%)")
